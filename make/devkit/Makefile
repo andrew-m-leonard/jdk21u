@@ -58,7 +58,7 @@
 COMMA := ,
 
 os := $(shell uname -o)
-cpu := $(shell uname -p)
+cpu := $(shell uname -m)
 
 # Figure out what platform this is building on.
 me := $(cpu)-$(if $(findstring Linux,$(os)),linux-gnu)
@@ -87,19 +87,20 @@ endif
 
 OUTPUT_ROOT = $(abspath ../../build/devkit)
 RESULT = $(OUTPUT_ROOT)/result
+BOOT_RESULT = $(OUTPUT_ROOT)/boot_result
 
-submakevars = HOST=$@ BUILD=$(me) RESULT=$(RESULT) OUTPUT_ROOT=$(OUTPUT_ROOT)
+submakevars = HOST=$@ BUILD=$(me) RESULT=$(RESULT) BOOT_RESULT=$(BOOT_RESULT) OUTPUT_ROOT=$(OUTPUT_ROOT)
 
 $(host_platforms) :
 	@echo 'Building compilers for $@'
 	@echo 'Targets: $(target_platforms)'
 	for p in $(filter $@, $(target_platforms)) $(filter-out $@, $(target_platforms)); do \
 	  $(MAKE) -f Tools.gmk download-rpms $(submakevars) \
-              TARGET=$$p PREFIX=$(RESULT)/$@-to-$$p && \
+              TARGET=$$p PREFIX=$(RESULT)/$@-to-$$p BOOT_PREFIX=$(BOOT_RESULT)/$@-to-$$p  && \
 	  $(MAKE) -f Tools.gmk all $(submakevars) \
-              TARGET=$$p PREFIX=$(RESULT)/$@-to-$$p && \
+              TARGET=$$p PREFIX=$(RESULT)/$@-to-$$p BOOT_PREFIX=$(BOOT_RESULT)/$@-to-$$p && \
 	  $(MAKE) -f Tools.gmk ccache $(submakevars) \
-              TARGET=$@ PREFIX=$(RESULT)/$@-to-$$p || exit 1 ; \
+              TARGET=$@ PREFIX=$(RESULT)/$@-to-$$p BOOT_PREFIX=$(BOOT_RESULT)/$@-to-$$p || exit 1 ; \
 	done
 	@echo 'All done"'
 

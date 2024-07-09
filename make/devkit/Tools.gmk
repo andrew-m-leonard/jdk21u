@@ -62,6 +62,23 @@ ifeq ($(BASE_OS), OL)
     BASE_URL := http://yum.oracle.com/repo/OracleLinux/OL6/4/base/$(ARCH)/
     LINUX_VERSION := OL6.4
   endif
+else ifeq ($(BASE_OS), Centos)
+  DEFAULT_OS_VERSION := 7
+  ifeq ($(BASE_OS_VERSION), )
+    BASE_OS_VERSION := $(DEFAULT_OS_VERSION)
+  endif
+  BASE_OS_MAJOR_VERSION := $(shell echo $(BASE_OS_VERSION) | cut -d'.' -f1)
+  ifeq ($(BASE_OS_VERSION),7.9.2009)
+     CENTOS_MIRROR := mirror.centos.org
+  else
+     CENTOS_MIRROR := vault.centos.org
+  endif
+  ifeq ($(ARCH), x86_64)
+    BASE_URL := http://$(CENTOS_MIRROR)/centos/$(BASE_OS_VERSION)/os/$(ARCH)/Packages/
+  else
+    BASE_URL := http://$(CENTOS_MIRROR)/altarch/$(BASE_OS_VERSION)/os/$(ARCH)/Packages/
+  endif
+  LINUX_VERSION := Centos$(BASE_OS_VERSION)
 else ifeq ($(BASE_OS), Fedora)
   ifeq ($(ARCH), riscv64)
     DEFAULT_OS_VERSION := rawhide/68692
@@ -87,6 +104,7 @@ else ifeq ($(BASE_OS), Fedora)
       BASE_URL := https://archives.fedoraproject.org/pub/archive/$(FEDORA_TYPE)/releases/$(BASE_OS_VERSION)/Everything/$(ARCH)/os/Packages/
     endif
   endif
+  BASE_OS_MAJOR_VERSION := $(shell echo $(BASE_OS_VERSION) | cut -d'.' -f1)
   LINUX_VERSION := Fedora_$(BASE_OS_VERSION)
 else
   $(error Unknown base OS $(BASE_OS))
@@ -95,16 +113,39 @@ endif
 ##########################################################################################
 # Define external dependencies
 
+# Centos GPG KEYS
+Centos_7_GPG_KEY_noarch := 6341AB2753D78A78A7C27BB124C6A8A7F4A80EB5  #gitleaks:allow
+Centos_7_GPG_KEY_aarch64 := EF8F3CA66EFDF32B36CDADF76C7CB6EF305D49D6 #gitleaks:allow
+Centos_7_GPG_KEY_x86_64 := 6341AB2753D78A78A7C27BB124C6A8A7F4A80EB5  #gitleaks:allow
+Centos_7_GPG_KEY_ppc64le := BAFA3436FC50768E3C3C2E4EA963BBDBF533F4FA #gitleaks:allow
+# Fedora GPG KEYS
+Fedora_19_GPG_KEY_s390x := CA81B2C85E4F4D4A1A3F723407477E65FB4B18E6   #gitleaks:allow
+
+# PGP Signature file extensions
+GCC_SIG := sig
+BINUTILS_SIG := sig
+CCACHE_SIG := asc
+GMP_SIG := sig
+MPC_SIG := sig
+GDB_SIG := sig
+
 # Latest that could be made to work.
 GCC_VER := 11.3.0
 ifeq ($(GCC_VER), 11.3.0)
   gcc_ver := gcc-11.3.0
+  GCC_GPG_KEY := 7F74F97C103468EE5D750B583AB00996FC26A641 #gitleaks:allow
   binutils_ver := binutils-2.39
+  BINUTILS_GPG_KEY := 3A24BC1E8FB409FA9F14371813FCEF89DD9E3C4F #gitleaks:allow
   ccache_ver := ccache-3.7.12
+  CCACHE_GPG_KEY := 5A939A71A46792CF57866A51996DDA075594ADB8 #gitleaks:allow
   mpfr_ver := mpfr-4.1.1
+  MPFR_SHA256 := 85fdf11614cc08e3545386d6b9c8c9035e3db1e506211a45f4e108117fe3c951 #gitleaks:allow
   gmp_ver := gmp-6.2.1
+  GMP_GPG_KEY := 343C2FF0FBEE5EC2EDBEF399F3599FF828C67298 #gitleaks:allow
   mpc_ver := mpc-1.2.1
+  MPC_GPG_KEY := AD17A21EF8AED8F1CC02DBD9F7D5C9BF765C61E3 #gitleaks:allow
   gdb_ver := gdb-11.2
+  GDB_GPG_KEY := F40ADB902B24264AA42E50BF92EDB04BFF325CF3 #gitleaks:allow
   REQUIRED_MIN_MAKE_MAJOR_VERSION := 4
 else ifeq ($(GCC_VER), 11.2.0)
   gcc_ver := gcc-11.2.0
@@ -246,7 +287,17 @@ download-rpms:
         # Only run this if rpm dir is empty.
         ifeq ($(wildcard $(DOWNLOAD_RPMS)/*.rpm), )
 	  cd $(DOWNLOAD_RPMS) && \
-	      wget -r -np -nd $(patsubst %, -A "*%*.rpm", $(RPM_LIST)) $(BASE_URL)
+	    wget -e robots=off -r -np -nd $(patsubst %, -A "*%*.rpm", $(RPM_LIST)) $(BASE_URL)
+	  gpg --keyserver keyserver.ubuntu.com --recv-keys \
+	    $($(BASE_OS)_$(BASE_OS_MAJOR_VERSION)_GPG_KEY_$(ARCH))
+	  gpg --keyserver keyserver.ubuntu.com --recv-keys \
+	    $($(BASE_OS)_$(BASE_OS_MAJOR_VERSION)_GPG_KEY_noarch)
+	  rm -f $(DOWNLOAD_RPMS)/rpm.sig && gpg --armor --export \
+	    $($(BASE_OS)_$(BASE_OS_MAJOR_VERSION)_GPG_KEY_$(ARCH)) > $(DOWNLOAD_RPMS)/rpm.sig
+	  gpg --armor --export \
+	    $($(BASE_OS)_$(BASE_OS_MAJOR_VERSION)_GPG_KEY_noarch) >> $(DOWNLOAD_RPMS)/rpm.sig
+	  rpm --import $(DOWNLOAD_RPMS)/rpm.sig || true
+	  rpm -K $(DOWNLOAD_RPMS)/*.rpm
         endif
 
 ##########################################################################################
@@ -271,10 +322,26 @@ define Download
 
   $$($(1)_FILE) :
 	wget -P $(DOWNLOAD) $$($(1))
+        ifeq ($(1),MPFR)
+	  echo $($(1)_SHA256) $$@ | sha256sum -c
+        else
+	  wget -P $(DOWNLOAD) $$($(1)).$($(1)_SIG)
+	  gpg --keyserver keyserver.ubuntu.com --recv-keys $($(1)_GPG_KEY)
+	  echo -e "5\ny\n" | gpg --batch --command-fd 0 --expert --edit-key $($(1)_GPG_KEY) trust;
+	  gpg --verify $$@.$($(1)_SIG) $$@
+        endif
 endef
 
 # Download and unpack all source packages
 $(foreach p,GCC BINUTILS CCACHE MPFR GMP MPC GDB,$(eval $(call Download,$(p))))
+BOOT_BINUTILS_DIRNAME = boot_$(BINUTILS_DIRNAME)
+BOOT_BINUTILS_DIR = $(abspath $(SRCDIR)/$(BOOT_BINUTILS_DIRNAME))
+BOOT_BINUTILS_CFG = $(BOOT_BINUTILS_DIR)/configure
+
+$(BOOT_BINUTILS_CFG) : $(BINUTILS_CFG)
+	mkdir -p $(BOOT_BINUTILS_DIR)
+	cp -r $(BINUTILS_DIR)/* $(BOOT_BINUTILS_DIR)
+	touch $@
 
 ##########################################################################################
 # Unpack RPMS
@@ -323,6 +390,9 @@ $(foreach p,$(RPM_FILE_LIST),$(eval $(call unrpm,$(p))))
 # have it anyway, but just to make sure...
 # Patch libc.so and libpthread.so to force linking against libraries in sysroot
 # and not the ones installed on the build machine.
+# Remove comment sections from static libraries and C runtime objects
+# to prevent leaking RHEL-specific package versions into
+# devkit-produced binaries.
 $(libs) : $(rpms)
 	@echo Patching libc and pthreads
 	@(for f in `find $(SYSROOT) -name libc.so -o -name libpthread.so`; do \
@@ -332,6 +402,7 @@ $(libs) : $(rpms)
 	      -e 's|/lib/||g' ) > $$f.tmp ; \
 	  mv $$f.tmp $$f ; \
 	done)
+	@find $(SYSROOT) -name '*.[ao]' -exec objcopy --remove-section .comment '{}' ';'
 	@mkdir -p $(SYSROOT)/usr/lib
 	@touch $@
 
@@ -352,6 +423,7 @@ endif
 
 # Define marker files for each source package to be compiled
 $(foreach t,binutils mpfr gmp mpc gcc ccache gdb,$(eval $(t) = $(TARGETDIR)/$($(t)_ver).done))
+boot_binutils = $(TARGETDIR)/boot_$(binutils_ver).done
 
 ##########################################################################################
 
@@ -360,7 +432,11 @@ CONFIG = --target=$(TARGET) \
     --host=$(HOST) --build=$(BUILD) \
     --prefix=$(PREFIX)
 
-PATHEXT = $(PREFIX)/bin:
+BOOT_CONFIG = --target=$(TARGET) \
+    --host=$(HOST) --build=$(BUILD) \
+    --prefix=$(BOOT_PREFIX)
+
+PATHEXT = $(PREFIX)/bin:$(BOOT_PREFIX)/bin:
 
 PATHPRE = PATH=$(PATHEXT)$(PATH)
 NUM_CORES := $(shell cat /proc/cpuinfo | grep -c processor)
@@ -380,6 +456,7 @@ ifeq ($(HOST),$(BUILD))
 endif
 
 TOOLS ?= $(call declare_tools,_FOR_TARGET,$(TARGET)-)
+BOOT_TOOLS = $(call declare_tools,,$(TARGET)-)
 
 ##########################################################################################
 
@@ -388,7 +465,7 @@ TOOLS ?= $(call declare_tools,_FOR_TARGET,$(TARGET)-)
 # If multilib, the second should be 32-bit, and we resolve
 # CFLAG_<name> to most likely -m32.
 define mk_bfd
-  $$(info Libs for $(1))
+  $$(info Libs for $(1) : $(BUILDDIR)/$(binutils_ver)-$(subst /,-,$(1))/Makefile)
   $$(BUILDDIR)/$$(binutils_ver)-$(subst /,-,$(1))/Makefile \
       : CFLAGS += $$(CFLAGS_$(1))
   $$(BUILDDIR)/$$(binutils_ver)-$(subst /,-,$(1))/Makefile \
@@ -398,12 +475,26 @@ define mk_bfd
   bfdmakes += $$(BUILDDIR)/$$(binutils_ver)-$(subst /,-,$(1))/Makefile
 endef
 
+define boot_mk_bfd
+  $$(info Boot Libs for $(1) : $(BUILDDIR)/boot_$(binutils_ver)-$(subst /,-,$(1))/Makefile)
+  $$(BUILDDIR)/boot_$$(binutils_ver)-$(subst /,-,$(1))/Makefile \
+      : CFLAGS += $$(CFLAGS_$(1))
+  $$(BUILDDIR)/boot_$$(binutils_ver)-$(subst /,-,$(1))/Makefile \
+      : LIBDIRS = --libdir=$(TARGETDIR)/$(1)
+
+  boot_bfdlib += $$(TARGETDIR)/boot_$$(binutils_ver)-$(subst /,-,$(1)).done
+  boot_bfdmakes += $$(BUILDDIR)/boot_$$(binutils_ver)-$(subst /,-,$(1))/Makefile
+endef
+
 # Create one set of bfds etc for each multilib arch
 $(foreach l,$(LIBDIRS),$(eval $(call mk_bfd,$(l))))
+$(foreach l,$(LIBDIRS),$(eval $(call boot_mk_bfd,$(l))))
 
 # Only build these two libs.
 $(bfdlib) : MAKECMD = all-libiberty all-bfd
 $(bfdlib) : INSTALLCMD = install-libiberty install-bfd
+$(boot_bfdlib) : MAKECMD = all-libiberty all-bfd
+$(boot_bfdlib) : INSTALLCMD = install-libiberty install-bfd
 
 # Building targets libbfd + libiberty. HOST==TARGET, i.e not
 # for a cross env.
@@ -412,16 +503,24 @@ $(bfdmakes) : CONFIG = --target=$(TARGET) \
     --prefix=$(TARGETDIR) \
     --with-sysroot=$(SYSROOT) \
     $(LIBDIRS)
+$(boot_bfdmakes) : CONFIG = --target=$(TARGET) \
+    --host=$(TARGET) --build=$(BUILD) \
+    --prefix=$(TARGETDIR) \
+    --with-sysroot=$(SYSROOT) \
+    $(LIBDIRS)
 
 $(bfdmakes) : TOOLS = $(call declare_tools,_FOR_TARGET,$(TARGET)-) $(call declare_tools,,$(TARGET)-)
+$(boot_bfdmakes) : TOOLS = $(call declare_tools,_FOR_TARGET,$(TARGET)-) $(call declare_tools,,$(TARGET)-)
 
 ##########################################################################################
 
 $(gcc) \
+    $(boot_binutils) \
     $(binutils) \
     $(gmp) \
     $(mpfr) \
     $(mpc) \
+    $(boot_bfdmakes) \
     $(bfdmakes) \
     $(ccache) : ENVS += $(TOOLS)
 
@@ -431,6 +530,7 @@ $(gcc) \
 # we build just the libs again for TARGET, then with whatever the arch
 # wants.
 $(BUILDDIR)/$(binutils_ver)/Makefile : CONFIG += --enable-64-bit-bfd --libdir=$(PREFIX)/$(word 1,$(LIBDIRS))
+$(BUILDDIR)/boot_$(binutils_ver)/Makefile : CONFIG += --enable-64-bit-bfd --libdir=$(BOOT_PREFIX)/$(word 1,$(LIBDIRS))
 
 ifneq ($(ARCH), riscv64)
   # gold is not available for riscv64 for some reason,
@@ -440,25 +540,50 @@ endif
 
 # Makefile creation. Simply run configure in build dir.
 # Setting CFLAGS to -O2 generates a much faster ld.
+# Use --enable-deterministic-archives so that make targets that
+# generate "ar" archives, such as "static-libs-image", produce
+# deterministic .a files.
 $(bfdmakes) \
-$(BUILDDIR)/$(binutils_ver)/Makefile \
-    : $(BINUTILS_CFG)
+$(BUILDDIR)/boot_$(binutils_ver)/Makefile \
+    : $(BOOT_BINUTILS_CFG)
 	$(info Configuring $@. Log in $(@D)/log.config)
 	@mkdir -p $(@D)
 	( \
 	  cd $(@D) ; \
 	  $(PATHPRE) $(ENVS) CFLAGS="-O2 $(CFLAGS)" \
-	      $(BINUTILS_CFG) \
-	      $(CONFIG) \
+	      $(BOOT_BINUTILS_CFG) \
+	      $(BOOT_CONFIG) \
 	      $(LINKER_CONFIG) \
 	      --with-sysroot=$(SYSROOT) \
 	      --disable-nls \
 	      --program-prefix=$(TARGET)- \
+	      --enable-deterministic-archives \
 	      --enable-multilib \
 	      --enable-threads \
 	      --enable-plugins \
 	) > $(@D)/log.config 2>&1
 	@echo 'done'
+
+$(boot_bfdmakes) \
+$(BUILDDIR)/$(binutils_ver)/Makefile \
+    : $(BINUTILS_CFG)
+	        $(info Configuring $@. Log in $(@D)/log.config)
+	        @mkdir -p $(@D)
+	        ( \
+	          cd $(@D) ; \
+	          $(PATHPRE) $(ENVS) CFLAGS="-O2 $(CFLAGS)" \
+	              $(BINUTILS_CFG) \
+	              $(CONFIG) \
+	              $(LINKER_CONFIG) \
+	              --with-sysroot=$(SYSROOT) \
+	              --disable-nls \
+	              --program-prefix=$(TARGET)- \
+	              --enable-deterministic-archives \
+	              --enable-multilib \
+	              --enable-threads \
+	              --enable-plugins \
+	        ) > $(@D)/log.config 2>&1
+	        @echo 'done'
 
 $(BUILDDIR)/$(mpfr_ver)/Makefile \
     : $(MPFR_CFG)
@@ -543,6 +668,7 @@ $(BUILDDIR)/$(gcc_ver)/Makefile \
 	      --enable-languages=c,c++ \
 	      --enable-shared \
 	      --disable-nls \
+	      --without-isl \
 	      --with-gnu-as \
 	      --with-gnu-ld \
 	      --with-mpfr=$(PREFIX) \
@@ -552,6 +678,7 @@ $(BUILDDIR)/$(gcc_ver)/Makefile \
 	@echo 'done'
 
 # need binutils for gcc
+$(binutils) : $(boot_binutils)
 $(gcc) : $(binutils)
 
 # as of 4.3 or so need these for doing config
@@ -640,7 +767,7 @@ endif
 # Always need to build cross tools for build host self.
 $(TARGETDIR)/%.done : $(BUILDDIR)/%/Makefile
 	$(info Building $(basename $@). Log in $(<D)/log.build)
-	$(PATHPRE) $(ENVS) $(MAKE) $(BUILDPAR) -f $< -C $(<D) $(MAKECMD) $(MAKECMD.$(notdir $@)) > $(<D)/log.build 2>&1
+	$(PATHPRE) $(ENVS) $(MAKE) --debug $(BUILDPAR) -f $< -C $(<D) $(MAKECMD) $(MAKECMD.$(notdir $@)) > $(<D)/log.build 2>&1
 	@echo -n 'installing...'
 	$(PATHPRE) $(MAKE) $(INSTALLPAR) -f $< -C $(<D) $(INSTALLCMD) $(MAKECMD.$(notdir $@)) > $(<D)/log.install 2>&1
 	@mkdir -p $(@D)
@@ -695,17 +822,19 @@ endif
 
 ##########################################################################################
 
+boot_bfdlib : $(boot_bfdlib)
 bfdlib : $(bfdlib)
+boot_binutils : $(boot_binutils)
 binutils : $(binutils)
 rpms : $(rpms)
 libs : $(libs)
 sysroot : rpms libs
 gcc : sysroot $(gcc) $(gccpatch)
 gdb : $(gdb)
-all : binutils gcc bfdlib $(PREFIX)/devkit.info $(missing-links) $(SYSROOT_LINKS) \
+all : boot_binutils binutils gcc boot_bfdlib bfdlib $(PREFIX)/devkit.info $(missing-links) $(SYSROOT_LINKS) \
     $(THESE_MAKEFILES) gdb
 
 # this is only built for host. so separate.
 ccache : $(ccache)
 
-.PHONY : gcc all binutils bfdlib link_libs rpms libs sysroot
+.PHONY : gcc all boot_binutils binutils boot_bfdlib bfdlib link_libs rpms libs sysroot
